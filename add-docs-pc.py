@@ -92,6 +92,7 @@ for i, key in enumerate(files):
 
         with open('logs.txt', '+a', encoding='utf-8') as f:
             f.write(key)
+            f.write('\n')
             f.write(f'%{100*i/len(files)} done')
             f.write('\n')
         print(f'%{100*i/len(files)} done')
