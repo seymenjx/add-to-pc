@@ -9,6 +9,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
@@ -18,9 +19,14 @@ INDEX_NAME = os.getenv("INDEX_NAME")
 s3 = boto3.client('s3', aws_access_key_id= AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 def list_files(bucket_name, prefix):
-   
-    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-    return [obj['Key'] for obj in response.get('Contents', [])]
+    paginator = s3.get_paginator('list_objects_v2')
+    page_iterator = paginator.paginate(Bucket=bucket_name)
+    
+    files = []
+    for page in page_iterator:
+        files.extend([obj['Key'] for obj in page.get('Contents', [])])
+    
+    return files
 
 def download_file(bucket_name, key, local_dir):
     if not os.path.exists(local_dir):
@@ -68,17 +74,17 @@ def add_documents_pinecone(chunks):
     pinecone_vs.add_documents(chunks)
 
 
-
 files= list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
+print(len(files))
 
 for i, key in enumerate(files):
     with open('logs.txt', 'r', encoding='utf-8') as controller:
-        lines = f.readlines()
+        lines = controller.readlines()
     
     if key in lines:
          continue
     else:
-        file_path = download_file(AWS_BUCKET_NAME, key, 'downloaded')
+        file_path = download_file(bucket_name=AWS_BUCKET_NAME, key=key, local_dir='downloaded')
 
         doc = docCreator(file_path)
         chunks = semantic_documents_chunks(doc)
@@ -87,5 +93,6 @@ for i, key in enumerate(files):
         with open('logs.txt', '+a', encoding='utf-8') as f:
             f.write(key)
             f.write(f'%{100*i/len(files)} done')
+            f.write('\n')
         print(f'%{100*i/len(files)} done')
         os.remove(file_path)
