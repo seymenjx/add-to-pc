@@ -1,0 +1,91 @@
+import boto3
+from langchain_openai import OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_ai21 import AI21SemanticTextSplitter
+from langchain_community.document_loaders import TextLoader
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
+PREFIX =  os.getenv("PREFIX")
+INDEX_NAME = os.getenv("INDEX_NAME")
+
+s3 = boto3.client('s3', aws_access_key_id= AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+def list_files(bucket_name, prefix):
+   
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+    return [obj['Key'] for obj in response.get('Contents', [])]
+
+def download_file(bucket_name, key, local_dir):
+    if not os.path.exists(local_dir):
+        os.makedirs(local_dir)
+    
+    local_file_path = os.path.join(local_dir, os.path.basename(key))
+    s3.download_file(bucket_name, key, local_file_path)
+    print(f"Downloaded {key} to {local_file_path}")
+    return local_file_path
+
+def docCreator(path):
+    loader = TextLoader(path)
+
+    return loader.load()
+
+
+def semantic_documents_chunks(documents):
+    print('chunking...')
+    text_splitter = CharacterTextSplitter(
+            separator= "\n",
+            chunk_size= 15000,
+            chunk_overlap=0,
+            length_function= len,
+        )
+    chunks1 = text_splitter.split_documents(documents=documents)
+    semantic_text_splitter = AI21SemanticTextSplitter()
+    chunks = semantic_text_splitter.split_documents(chunks1)
+
+    for chunk in chunks:
+        f = chunk.metadata['source']
+        with open(f, 'r', encoding='utf-8') as file:
+                    count = 0
+                    for l in file.readlines():
+                        count += 1
+                        if l.startswith('Esas :'):
+                            chunk.metadata['esas'] = l.replace("\n", "")
+                        elif l.startswith('Karar :'):
+                            chunk.metadata['karar'] = l.replace("\n", "")
+
+    return chunks
+
+def add_documents_pinecone(chunks):
+    embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
+    pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+    pinecone_vs.add_documents(chunks)
+
+
+
+files= list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
+
+for i, key in enumerate(files):
+    with open('logs.txt', 'r', encoding='utf-8') as controller:
+        lines = f.readlines()
+    
+    if key in lines:
+         continue
+    else:
+        file_path = download_file(AWS_BUCKET_NAME, key, 'downloaded')
+
+        doc = docCreator(file_path)
+        chunks = semantic_documents_chunks(doc)
+        add_documents_pinecone(chunks=chunks)
+
+        with open('logs.txt', '+a', encoding='utf-8') as f:
+            f.write(key)
+            f.write(f'%{100*i/len(files)} done')
+        print(f'%{100*i/len(files)} done')
+        os.remove(file_path)
