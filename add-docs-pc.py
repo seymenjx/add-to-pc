@@ -4,6 +4,7 @@ from langchain_pinecone import PineconeVectorStore
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_ai21 import AI21SemanticTextSplitter
 from langchain_community.document_loaders import TextLoader
+from langchain.docstore.document import Document
 
 import os
 from dotenv import load_dotenv
