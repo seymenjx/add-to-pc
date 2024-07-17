@@ -5,8 +5,7 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain_ai21 import AI21SemanticTextSplitter
 from langchain_community.document_loaders import TextLoader
 from langchain.docstore.document import Document
-
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from dotenv import load_dotenv
 
@@ -22,22 +21,13 @@ s3 = boto3.client('s3', aws_access_key_id= AWS_ACCESS_KEY_ID, aws_secret_access_
 
 def list_files(bucket_name, prefix):
     paginator = s3.get_paginator('list_objects_v2')
-    page_iterator = paginator.paginate(Bucket=bucket_name)
+    page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
     
     files = []
     for page in page_iterator:
         files.extend([obj['Key'] for obj in page.get('Contents', [])])
     
     return files
-
-def download_file(bucket_name, key, local_dir):
-    if not os.path.exists(local_dir):
-        os.makedirs(local_dir)
-    
-    local_file_path = os.path.join(local_dir, os.path.basename(key))
-    s3.download_file(bucket_name, key, local_file_path)
-    print(f"Downloaded {key} to {local_file_path}")
-    return local_file_path
 
 def read_file_from_s3(bucket, key):
     try:
@@ -49,12 +39,9 @@ def read_file_from_s3(bucket, key):
         print(f"Dosya okunurken hata oluştu: {e}")
         return None
 
-
 def docCreator(path):
     loader = TextLoader(path)
-
     return loader.load()
-
 
 def semantic_documents_chunks(documents):
     print('chunking...')
@@ -67,18 +54,6 @@ def semantic_documents_chunks(documents):
     chunks1 = text_splitter.split_documents(documents=documents)
     semantic_text_splitter = AI21SemanticTextSplitter()
     chunks = semantic_text_splitter.split_documents(chunks1)
-
-    ''' for chunk in chunks:
-        f = chunk.metadata['source']
-        with open(f, 'r', encoding='utf-8') as file:
-                    count = 0
-                    for l in file.readlines():
-                        count += 1
-                        if l.startswith('Esas :'):
-                            chunk.metadata['esas'] = l.replace("\n", "")
-                        elif l.startswith('Karar :'):
-                            chunk.metadata['karar'] = l.replace("\n", "")
-    '''
     return chunks
 
 def add_documents_pinecone(chunks):
@@ -86,46 +61,42 @@ def add_documents_pinecone(chunks):
     pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     pinecone_vs.add_documents(chunks)
 
-
-files= list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
-print(len(files))
-'''
-for i, key in enumerate(files):
+def process_file(key):
     with open('logs.txt', 'r', encoding='utf-8') as controller:
         lines = controller.readlines()
     if str(key+'\n') in lines:
         print('already uploaded')
-        continue
-    else:
-        file_path = download_file(bucket_name=AWS_BUCKET_NAME, key=key, local_dir='downloaded')
-
-        doc = docCreator(file_path)
-        chunks = semantic_documents_chunks(doc)
-        add_documents_pinecone(chunks=chunks)
-
-        with open('logs.txt', '+a', encoding='utf-8') as f:
-            f.write(key)
-            f.write('\n')
-        print(f'%{100*i/len(files)} done')
-        os.remove(file_path)
-'''
-
-for i, key in enumerate(files):
-    with open('logs.txt', 'r', encoding='utf-8') as controller:
-        lines = controller.readlines()
-    if str(key+'\n') in lines:
-        print('already uploaded')
-        continue
-    else:
-        content= read_file_from_s3(bucket=AWS_BUCKET_NAME, key=key)
-        try: 
-            doc =  [Document(page_content=content, metadata={"source": key})]
+        return
+    
+    content = read_file_from_s3(bucket=AWS_BUCKET_NAME, key=key)
+    if content:
+        try:
+            doc = [Document(page_content=content, metadata={"source": key})]
             chunks = semantic_documents_chunks(doc)
             add_documents_pinecone(chunks=chunks)
             with open('logs.txt', '+a', encoding='utf-8') as f:
                 f.write(key)
                 f.write('\n')
-                print(f'%{100*i/len(files)} done')
+            print(f'{key} uploaded')
         except Exception as e:
-            print(f'error:{e}')
-            continue
+            print(f'error processing {key}: {e}')
+
+def process_files_in_batches(files, batch_size=10):
+    for i in range(0, len(files), batch_size):
+        batch = files[i:i+batch_size]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_to_key = {executor.submit(process_file, key): key for key in batch}
+            for future in as_completed(future_to_key):
+                key = future_to_key[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f'error processing {key}: {e}')
+
+def main():
+    files = list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
+    print(f'Total files: {len(files)}')
+    process_files_in_batches(files)
+
+if __name__ == "__main__":
+    main()
