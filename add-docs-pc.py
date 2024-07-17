@@ -19,9 +19,9 @@ INDEX_NAME = os.getenv("INDEX_NAME")
 
 s3 = boto3.client('s3', aws_access_key_id= AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
-def list_files(bucket_name, prefix):
+def list_files(bucket_name):
     paginator = s3.get_paginator('list_objects_v2')
-    page_iterator = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
+    page_iterator = paginator.paginate(Bucket=bucket_name)
     
     files = []
     for page in page_iterator:
@@ -94,7 +94,7 @@ def process_files_in_batches(files, batch_size=10):
                     print(f'error processing {key}: {e}')
 
 def main():
-    files = list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
+    files = list_files(bucket_name=AWS_BUCKET_NAME)
     print(f'Total files: {len(files)}')
     process_files_in_batches(files)
 

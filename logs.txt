@@ -1,0 +1,3 @@
+Esas_2005 494 Karar_2021 254.txt
+Esas_2004 298 Karar_2021 794.txt
+Esas_2008 326 Karar_2019 648.txt
