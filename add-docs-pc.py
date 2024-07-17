@@ -19,14 +19,13 @@ INDEX_NAME = os.getenv("INDEX_NAME")
 s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 def list_files(bucket_name):
-    paginator = s3.get_paginator('list_objects_v2')
-    page_iterator = paginator.paginate(Bucket=bucket_name)
-    
-    files = []
-    for page in page_iterator:
-        files.extend([obj['Key'] for obj in page.get('Contents', [])])
-    
-    return files
+    try:
+        response = s3.list_objects_v2(Bucket=bucket_name)
+        files = [obj['Key'] for obj in response.get('Contents', [])]
+        return files
+    except Exception as e:
+        print(f"Error listing files: {e}")
+        return []
 
 def read_file_from_s3(bucket, key):
     try:
