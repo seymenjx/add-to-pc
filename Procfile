@@ -1,1 +1,1 @@
-worker: python add-docs-pc.py
+web: python add-docs-pc.py
