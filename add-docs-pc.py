@@ -80,9 +80,9 @@ print(len(files))
 for i, key in enumerate(files):
     with open('logs.txt', 'r', encoding='utf-8') as controller:
         lines = controller.readlines()
-    
-    if key in lines:
-         continue
+    if str(key+'\n') in lines:
+        print('already uploaded')
+        continue
     else:
         file_path = download_file(bucket_name=AWS_BUCKET_NAME, key=key, local_dir='downloaded')
 
@@ -92,8 +92,6 @@ for i, key in enumerate(files):
 
         with open('logs.txt', '+a', encoding='utf-8') as f:
             f.write(key)
-            f.write('\n')
-            f.write(f'%{100*i/len(files)} done')
             f.write('\n')
         print(f'%{100*i/len(files)} done')
         os.remove(file_path)
