@@ -4,6 +4,8 @@ from langchain_pinecone import PineconeVectorStore
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_ai21 import AI21SemanticTextSplitter
 from langchain_community.document_loaders import TextLoader
+from langchain.docstore.document import Document
+
 
 import os
 from dotenv import load_dotenv
@@ -37,6 +39,17 @@ def download_file(bucket_name, key, local_dir):
     print(f"Downloaded {key} to {local_file_path}")
     return local_file_path
 
+def read_file_from_s3(bucket, key):
+    try:
+        response = s3.get_object(Bucket=bucket, Key=key)
+        content = response['Body'].read().decode('utf-8')
+        print(f"Dosya başarıyla okundu: {key}")
+        return content
+    except Exception as e:
+        print(f"Dosya okunurken hata oluştu: {e}")
+        return None
+
+
 def docCreator(path):
     loader = TextLoader(path)
 
@@ -55,7 +68,7 @@ def semantic_documents_chunks(documents):
     semantic_text_splitter = AI21SemanticTextSplitter()
     chunks = semantic_text_splitter.split_documents(chunks1)
 
-    for chunk in chunks:
+    ''' for chunk in chunks:
         f = chunk.metadata['source']
         with open(f, 'r', encoding='utf-8') as file:
                     count = 0
@@ -65,7 +78,7 @@ def semantic_documents_chunks(documents):
                             chunk.metadata['esas'] = l.replace("\n", "")
                         elif l.startswith('Karar :'):
                             chunk.metadata['karar'] = l.replace("\n", "")
-
+    '''
     return chunks
 
 def add_documents_pinecone(chunks):
@@ -76,7 +89,7 @@ def add_documents_pinecone(chunks):
 
 files= list_files(bucket_name=AWS_BUCKET_NAME, prefix=PREFIX)
 print(len(files))
-
+'''
 for i, key in enumerate(files):
     with open('logs.txt', 'r', encoding='utf-8') as controller:
         lines = controller.readlines()
@@ -95,3 +108,24 @@ for i, key in enumerate(files):
             f.write('\n')
         print(f'%{100*i/len(files)} done')
         os.remove(file_path)
+'''
+
+for i, key in enumerate(files):
+    with open('logs.txt', 'r', encoding='utf-8') as controller:
+        lines = controller.readlines()
+    if str(key+'\n') in lines:
+        print('already uploaded')
+        continue
+    else:
+        content= read_file_from_s3(bucket=AWS_BUCKET_NAME, key=key)
+        try: 
+            doc =  [Document(page_content=content, metadata={"source": key})]
+            chunks = semantic_documents_chunks(doc)
+            add_documents_pinecone(chunks=chunks)
+            with open('logs.txt', '+a', encoding='utf-8') as f:
+                f.write(key)
+                f.write('\n')
+                print(f'%{100*i/len(files)} done')
+        except Exception as e:
+            print(f'error:{e}')
+            continue
