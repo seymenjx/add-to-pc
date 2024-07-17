@@ -5,7 +5,6 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain_ai21 import AI21SemanticTextSplitter
 from langchain_community.document_loaders import TextLoader
 from langchain.docstore.document import Document
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from dotenv import load_dotenv
 
@@ -14,10 +13,10 @@ load_dotenv(override=True)
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
-PREFIX =  os.getenv("PREFIX")
+PREFIX = os.getenv("PREFIX")
 INDEX_NAME = os.getenv("INDEX_NAME")
 
-s3 = boto3.client('s3', aws_access_key_id= AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
 
 def list_files(bucket_name):
     paginator = s3.get_paginator('list_objects_v2')
@@ -46,11 +45,11 @@ def docCreator(path):
 def semantic_documents_chunks(documents):
     print('chunking...')
     text_splitter = CharacterTextSplitter(
-            separator= "\n",
-            chunk_size= 15000,
-            chunk_overlap=0,
-            length_function= len,
-        )
+        separator="\n",
+        chunk_size=15000,
+        chunk_overlap=0,
+        length_function=len,
+    )
     chunks1 = text_splitter.split_documents(documents=documents)
     semantic_text_splitter = AI21SemanticTextSplitter()
     chunks = semantic_text_splitter.split_documents(chunks1)
@@ -64,10 +63,10 @@ def add_documents_pinecone(chunks):
 def process_file(key):
     with open('logs.txt', 'r', encoding='utf-8') as controller:
         lines = controller.readlines()
-    if str(key+'\n') in lines:
+    if str(key + '\n') in lines:
         print('already uploaded')
         return
-    
+
     content = read_file_from_s3(bucket=AWS_BUCKET_NAME, key=key)
     if content:
         try:
@@ -81,22 +80,12 @@ def process_file(key):
         except Exception as e:
             print(f'error processing {key}: {e}')
 
-def process_files_in_batches(files, batch_size=10):
-    for i in range(0, len(files), batch_size):
-        batch = files[i:i+batch_size]
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_to_key = {executor.submit(process_file, key): key for key in batch}
-            for future in as_completed(future_to_key):
-                key = future_to_key[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f'error processing {key}: {e}')
-
 def main():
     files = list_files(bucket_name=AWS_BUCKET_NAME)
     print(f'Total files: {len(files)}')
-    process_files_in_batches(files)
+    
+    for key in files:
+        process_file(key)
 
 if __name__ == "__main__":
     main()
