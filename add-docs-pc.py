@@ -45,7 +45,7 @@ def semantic_documents_chunks(documents):
     print('chunking...')
     text_splitter = CharacterTextSplitter(
         separator="\n",
-        chunk_size=15000,
+        chunk_size=1500,
         chunk_overlap=0,
         length_function=len,
     )
