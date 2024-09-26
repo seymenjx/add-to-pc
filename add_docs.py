@@ -93,13 +93,14 @@ def docCreator(main_content, summary_content, key):
 def semantic_documents_chunks_generator(document):
     text_splitter = CharacterTextSplitter(
         separator="\n",
-        chunk_size=1500,    
+        chunk_size=1000,  # Reduced chunk size
         chunk_overlap=0,
         length_function=len,
     )
-    yield from text_splitter.split_documents([document])
+    for chunk in text_splitter.split_text(document.page_content):
+        yield Document(page_content=chunk, metadata=document.metadata)
 
-def add_documents_pinecone_batched(chunks, batch_size=1):
+def add_documents_pinecone_batched(chunks):
     embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
     pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     
@@ -169,7 +170,6 @@ def process_all_files(celery_task=None):
         start_index = load_checkpoint()
         logger.info(f"Starting from index: {start_index}")
 
-        total_files = get_total_file_count()
         processed_files = 0
         skipped_files = 0
         for i, key in enumerate(islice(file_generator, start_index, None), start=start_index):
@@ -189,32 +189,24 @@ def process_all_files(celery_task=None):
 
             summary_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}")
             if summary_content is None:
-                logger.warning(f"Summary content for {key} is empty or couldn't be read, skipping")
-                skipped_files += 1
-                continue
+                logger.warning(f"Summary content for {key} not found, proceeding with main content only")
+                summary_content = ""  # Use an empty string instead of None
             
             try:
                 doc = docCreator(main_content, summary_content, key)
                 for chunk in semantic_documents_chunks_generator(doc):
                     add_documents_pinecone_batched([chunk])
+                    gc.collect()  # Force garbage collection after each chunk
                 
                 append_to_logs_s3(key)
                 processed_files += 1
                 
-                if total_files:
-                    progress = 100 * (i + 1) / total_files
-                    logger.info(f'{progress:.2f}% done. Processed {processed_files} files, skipped {skipped_files} files.')
-                else:
-                    logger.info(f"Processed {processed_files} files, skipped {skipped_files} files.")
+                logger.info(f"Processed {processed_files} files, skipped {skipped_files} files.")
                 
                 if celery_task:
-                    celery_task.update_state(state='PROGRESS', meta={'processed': processed_files, 'skipped': skipped_files, 'total': total_files})
-                
-                if i % 1000 == 0:  # Update total file count periodically
-                    update_total_file_count(i + 1)
-            
+                    celery_task.update_state(state='PROGRESS', meta={'processed': processed_files, 'skipped': skipped_files})
             except Exception as e:
-                logger.warning(f"Error processing {key}: {e}")
+                logger.warning(f"Error processing {key}: {str(e)}", exc_info=True)
                 skipped_files += 1
                 continue
             
@@ -225,7 +217,7 @@ def process_all_files(celery_task=None):
                 save_checkpoint(i)
         
         logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
-        return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files, 'total': total_files}
+        return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
     except Exception as e:
-        logger.critical(f"Critical error in main process: {e}")
+        logger.critical(f"Critical error in main process: {str(e)}", exc_info=True)
         return {'status': f'Error: {str(e)}'}
