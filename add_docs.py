@@ -45,11 +45,11 @@ except Exception as e:
     logger.error(f"Failed to initialize S3 client: {e}")
     raise
 
-def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=1000):
+def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=10000):
     s3 = boto3.client('s3')
     paginator = s3.get_paginator('list_objects_v2')
     
-    kwargs = {'Bucket': bucket_name, 'Prefix': prefix}
+    kwargs = {'Bucket': bucket_name, 'Prefix': prefix, 'PaginationConfig': {'PageSize': batch_size}}
     
     for page in paginator.paginate(**kwargs):
         batch = [item['Key'] for item in page.get('Contents', [])]
@@ -65,13 +65,20 @@ def process_file_batch(file_batch, embeddings):
                 processed += 1
             else:
                 skipped += 1
+            
+            if (processed + skipped) % 1000 == 0:  # Log progress every 1000 files
+                logger.info(f"Progress within batch: Processed {processed}, Skipped {skipped}")
         except Exception as e:
             logger.error(f"Error processing file {file_key}: {e}")
+            skipped += 1
+    
+    logger.info(f"Batch completed: Processed {processed}, Skipped {skipped}")
     return {'processed': processed, 'skipped': skipped}
 
 def process_all_files(celery_task=None):
     try:
-        total_files = get_total_file_count() or 0
+        bucket_name = os.getenv('AWS_BUCKET_NAME')
+        total_files = get_total_file_count(bucket_name) or 0
         processed_files = 0
         skipped_files = 0
         start_index = load_checkpoint()
@@ -79,13 +86,18 @@ def process_all_files(celery_task=None):
 
         embeddings = create_embeddings()
         
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = []
-            for file_batch in list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME')):
-                futures.append(executor.submit(process_file_batch, file_batch, embeddings))
+        file_generator = list_files_in_bucket_generator(bucket_name, batch_size=10000)
+        
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            while True:
+                try:
+                    file_batch = next(file_generator)
+                except StopIteration:
+                    break
                 
-            for future in as_completed(futures):
+                future = executor.submit(process_file_batch, file_batch, embeddings)
                 batch_result = future.result()
+                
                 processed_files += batch_result['processed']
                 skipped_files += batch_result['skipped']
                 
@@ -97,6 +109,8 @@ def process_all_files(celery_task=None):
                     })
                 
                 save_checkpoint(processed_files + skipped_files)
+                
+                logger.info(f"Batch complete. Total processed: {processed_files}, Total skipped: {skipped_files}")
         
         logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
         return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
