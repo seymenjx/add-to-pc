@@ -18,6 +18,7 @@ import platform
 from memory_profiler import profile
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import pinecone
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,6 +45,13 @@ try:
 except Exception as e:
     logger.error(f"Failed to initialize S3 client: {e}")
     raise
+
+# Initialize Pinecone client with a connection pool
+pinecone.init(api_key=os.getenv("PINECONE_API_KEY"), environment=os.getenv("PINECONE_ENVIRONMENT"))
+index = pinecone.Index(os.getenv("PINECONE_INDEX_NAME"))
+
+# Create a ThreadPoolExecutor with a limited number of workers
+chunk_executor = ThreadPoolExecutor(max_workers=5)
 
 def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=10000):
     s3 = boto3.client('s3')
@@ -86,31 +94,31 @@ def process_all_files(celery_task=None):
 
         embeddings = create_embeddings()
         
-        file_generator = list_files_in_bucket_generator(bucket_name, batch_size=10000)
+        file_generator = list_files_in_bucket_generator(bucket_name, batch_size=1000)  # Reduced batch size
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            while True:
-                try:
-                    file_batch = next(file_generator)
-                except StopIteration:
-                    break
+        while True:
+            try:
+                file_batch = next(file_generator)
+            except StopIteration:
+                break
+            
+            for file in file_batch:
+                if process_single_file(file, embeddings):
+                    processed_files += 1
+                else:
+                    skipped_files += 1
                 
-                future = executor.submit(process_file_batch, file_batch, embeddings)
-                batch_result = future.result()
-                
-                processed_files += batch_result['processed']
-                skipped_files += batch_result['skipped']
-                
-                if celery_task:
-                    celery_task.update_state(state='PROGRESS', meta={
-                        'current': processed_files + skipped_files,
-                        'total': total_files,
-                        'status': f'Processed: {processed_files}, Skipped: {skipped_files}'
-                    })
-                
-                save_checkpoint(processed_files + skipped_files)
-                
-                logger.info(f"Batch complete. Total processed: {processed_files}, Total skipped: {skipped_files}")
+                if (processed_files + skipped_files) % 100 == 0:
+                    if celery_task:
+                        celery_task.update_state(state='PROGRESS', meta={
+                            'current': processed_files + skipped_files,
+                            'total': total_files,
+                            'status': f'Processed: {processed_files}, Skipped: {skipped_files}'
+                        })
+                    save_checkpoint(processed_files + skipped_files)
+                    logger.info(f"Progress: Processed {processed_files}, Skipped {skipped_files}")
+                    gc.collect()
+                    log_memory_usage()
         
         logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
         return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
@@ -173,9 +181,10 @@ def semantic_documents_chunks_generator(document):
 
 def process_chunk(chunk, embeddings):
     try:
-        pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
-        pinecone_vs.add_documents([chunk])
-        logger.info(f"Added chunk to Pinecone index {INDEX_NAME}")
+        vector = embeddings.embed_query(chunk.page_content)
+        future = chunk_executor.submit(index.upsert, vectors=[(chunk.metadata['source'], vector, chunk.page_content)])
+        future.result()  # Wait for the upsert to complete
+        logger.info(f"Added chunk to Pinecone index {os.getenv('PINECONE_INDEX_NAME')}")
     except Exception as e:
         logger.error(f"Error processing chunk: {str(e)}")
 
@@ -196,9 +205,13 @@ def process_single_file(key, embeddings):
             summary_content = ""
 
         doc = docCreator(main_content, summary_content, key)
-        for chunk in semantic_documents_chunks_generator(doc):
-            process_chunk(chunk, embeddings)
-            gc.collect()
+        chunks = list(semantic_documents_chunks_generator(doc))
+        
+        for i in range(0, len(chunks), 10):  # Process 10 chunks at a time
+            batch = chunks[i:i+10]
+            for chunk in batch:
+                process_chunk(chunk, embeddings)
+            gc.collect()  # Force garbage collection after each batch
 
         append_to_logs_s3(key)
         return True
@@ -251,19 +264,28 @@ def load_checkpoint():
         raise
 
 def read_logs_from_s3():
-    """Read processing logs from S3."""
+    """Read processing logs from S3, create if not exists."""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt')
         return response['Body'].read().decode('utf-8').splitlines()
     except s3.exceptions.NoSuchKey:
+        logger.info("Log file not found in S3. Creating a new one.")
+        s3.put_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt', Body='')
+        return []
+    except Exception as e:
+        logger.error(f"Error reading logs from S3: {str(e)}")
         return []
 
 def append_to_logs_s3(key):
     """Append a processed file key to the logs in S3."""
-    current_logs = read_logs_from_s3()
-    current_logs.append(key)
-    logs_content = '\n'.join(current_logs)
-    s3.put_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt', Body=logs_content)
+    try:
+        current_logs = read_logs_from_s3()
+        current_logs.append(key)
+        logs_content = '\n'.join(current_logs)
+        s3.put_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt', Body=logs_content)
+        logger.info(f"Successfully appended {key} to logs in S3")
+    except Exception as e:
+        logger.error(f"Error appending to logs in S3: {str(e)}")
 
 def log_memory_usage():
     process = psutil.Process()
