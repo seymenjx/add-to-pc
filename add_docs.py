@@ -58,7 +58,21 @@ pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
 #         spec=ServerlessSpec(cloud='aws', region='us-west-2')  # adjust as needed
 #     )
 
-index = pc.Index(os.getenv("PINECONE_INDEX_NAME"))
+# Initialize Pinecone
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+
+# Get the index name from environment variable
+index_name = os.getenv("PINECONE_INDEX_NAME")
+if not index_name:
+    raise ValueError("PINECONE_INDEX_NAME environment variable is not set")
+
+# Initialize the index
+try:
+    index = pc.Index(index_name)
+    logger.info(f"Successfully connected to Pinecone index: {index_name}")
+except Exception as e:
+    logger.error(f"Failed to connect to Pinecone index: {str(e)}")
+    raise
 
 # Create a ThreadPoolExecutor with a limited number of workers
 chunk_executor = ThreadPoolExecutor(max_workers=5)
@@ -191,23 +205,25 @@ def semantic_documents_chunks_generator(document):
         )
         del chunk  # Explicitly delete the chunk to free memory
 
-def process_chunk(chunk, embeddings):
+def process_chunk(chunk, index, namespace):
     try:
-        vector = embeddings.embed_query(chunk.page_content)
-        metadata = {
-            'source': chunk.metadata['source'],
-            'summary': chunk.metadata.get('summary', '')  # Include summary if available
-        }
-        future = chunk_executor.submit(index.upsert, vectors=[(
-            chunk.metadata['source'],  # ID
-            vector,  # Vector
-            metadata,  # Metadata
-            chunk.page_content  # Content
-        )])
-        future.result()  # Wait for the upsert to complete
-        logger.info(f"Added chunk to Pinecone index {os.getenv('PINECONE_INDEX_NAME')}")
+        # Ensure the chunk is in the correct format
+        if isinstance(chunk, tuple) and len(chunk) == 4:
+            id, text, metadata, embedding = chunk
+            vector = {
+                'id': id,
+                'values': embedding,
+                'metadata': {**metadata, 'text': text}
+            }
+        else:
+            raise ValueError(f"Unexpected chunk format: {chunk}")
+
+        # Upsert the vector to Pinecone
+        index.upsert(vectors=[vector], namespace=namespace)
+        return True
     except Exception as e:
         logger.error(f"Error processing chunk: {str(e)}")
+        return False
 
 def process_single_file(key, embeddings):
     try:
@@ -231,7 +247,11 @@ def process_single_file(key, embeddings):
         for i in range(0, len(chunks), 10):  # Process 10 chunks at a time
             batch = chunks[i:i+10]
             for chunk in batch:
-                process_chunk(chunk, embeddings)
+                success = process_chunk(chunk, index)
+                if success:
+                    processed_files += 1
+                else:
+                    skipped_files += 1
                 del chunk  # Explicitly delete the chunk to free memory
                 gc.collect()  # Force garbage collection after each chunk
 
