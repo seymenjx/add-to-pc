@@ -14,9 +14,10 @@ import gc
 from itertools import islice
 import psutil
 import time
-import resource
+import platform
 from memory_profiler import profile
 from tenacity import retry, stop_after_attempt, wait_random_exponential
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,16 +45,48 @@ except Exception as e:
     logger.error(f"Failed to initialize S3 client: {e}")
     raise
 
-def list_files_in_bucket_generator(bucket_name):
-    """Generate a list of files in the specified S3 bucket."""
+def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=1000):
+    """Generate batches of file names from the specified S3 bucket."""
     s3 = boto3.client('s3')
     paginator = s3.get_paginator('list_objects_v2')
     
-    for page in paginator.paginate(Bucket=bucket_name):
-        for item in page.get('Contents', []):
-            yield item['Key']
+    kwargs = {'Bucket': bucket_name, 'Prefix': prefix}
+    
+    for page in paginator.paginate(**kwargs):
+        batch = [item['Key'] for item in page.get('Contents', [])]
+        if batch:
+            yield batch
 
-@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
+def process_file_batch(bucket_name, file_batch):
+    """Process a batch of files."""
+    for file_key in file_batch:
+        try:
+            # Your processing logic here
+            logger.info(f"Processing file: {file_key}")
+            # Example: read_file_from_s3_streaming(bucket_name, file_key)
+            # Example: process_single_file(file_key, embeddings)
+        except Exception as e:
+            logger.error(f"Error processing file {file_key}: {e}")
+
+def process_all_files(bucket_name, max_workers=10):
+    try:
+        total_files = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = []
+            for file_batch in list_files_in_bucket_generator(bucket_name):
+                total_files += len(file_batch)
+                futures.append(executor.submit(process_file_batch, bucket_name, file_batch))
+                logger.info(f"Submitted batch. Total files so far: {total_files}")
+
+            for future in as_completed(futures):
+                future.result()  # This will raise any exceptions that occurred during processing
+
+        logger.info(f"Processing complete. Total files processed: {total_files}")
+        return {'status': 'All files processed successfully', 'total_files': total_files}
+    except Exception as e:
+        logger.critical(f"Critical error in main process: {str(e)}", exc_info=True)
+        return {'status': f'Error: {str(e)}'}
+
 def create_embeddings():
     return OpenAIEmbeddings(model='text-embedding-3-large')
 
@@ -167,8 +200,7 @@ def process_files_in_batches(file_list, batch_size=10):
 
 def process_all_files(celery_task=None):
     try:
-        limit_memory(450 * 1024 * 1024)
-        
+        # Remove the call to limit_memory or replace it with the dummy function
         file_generator = list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))
         start_index = load_checkpoint()
         logger.info(f"Starting from index: {start_index}")
@@ -218,14 +250,10 @@ def append_to_logs_s3(key):
     logs_content = '\n'.join(current_logs)
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt', Body=logs_content)
 
-def limit_memory(max_mem):
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (max_mem, hard))
-
 def log_memory_usage():
     process = psutil.Process()
-    mem_info = process.memory_info()
-    logger.info(f"Memory usage: {mem_info.rss / 1024 / 1024:.2f} MB")
+    memory_info = process.memory_info()
+    logger.info(f"Memory usage: {memory_info.rss / 1024 / 1024:.2f} MB")
 
 def get_total_file_count():
     try:
