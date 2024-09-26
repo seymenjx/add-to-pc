@@ -66,14 +66,22 @@ def read_file_from_s3(bucket, key):
 
 def docCreator(main_content, summary_content, key):
     """Create a Document object with metadata."""
+    if not isinstance(main_content, str):
+        logger.warning(f"main_content for {key} is not a string. Converting to string.")
+        main_content = str(main_content) if main_content is not None else ""
+
     if summary_content:
         try:
+            if not isinstance(summary_content, str):
+                logger.warning(f"summary_content for {key} is not a string. Converting to string.")
+                summary_content = str(summary_content)
+
             metadata = {
                 "source": key,
                 "summary": summary_content
             }
-        except json.JSONDecodeError as e:
-            logger.error(f"Error parsing summary content for {key}: {e}")
+        except Exception as e:
+            logger.error(f"Error processing summary content for {key}: {e}")
             metadata = {"source": key}
     else:
         metadata = {"source": key}
@@ -200,6 +208,30 @@ def add_documents_pinecone_batched(chunks, batch_size=100):
         pinecone_vs.add_documents(batch)
         logger.info(f"Added batch of {len(batch)} chunks to Pinecone index {INDEX_NAME}")
 
+def docCreator(main_content, summary_content, key):
+    if not isinstance(main_content, str):
+        logger.warning(f"main_content for {key} is not a string. Converting to string.")
+        main_content = str(main_content) if main_content is not None else ""
+
+    if summary_content:
+        try:
+            if not isinstance(summary_content, str):
+                logger.warning(f"summary_content for {key} is not a string. Converting to string.")
+                summary_content = str(summary_content)
+
+            metadata = {
+                "source": key,
+                "summary": summary_content
+            }
+        except Exception as e:
+            logger.error(f"Error processing summary content for {key}: {e}")
+            metadata = {"source": key}
+    else:
+        metadata = {"source": key}
+    
+    logger.info(f"Created document with metadata for key: {key}")
+    return Document(page_content=main_content, metadata=metadata)
+
 def process_all_files(celery_task=None, batch_size=10):
     """Process all files in the S3 bucket and add them to Pinecone index."""
     try:
@@ -233,7 +265,7 @@ def process_all_files(celery_task=None, batch_size=10):
                     if celery_task:
                         celery_task.update_state(state='PROGRESS', meta={'status': f'{progress:.2f}% complete'})
                 except Exception as e:
-                    print(f'Error processing {key}: {e}')
+                    logger.warning(f"Error processing {key}: {e}")
                     continue
                 
                 gc.collect()  # Force garbage collection after processing each file
