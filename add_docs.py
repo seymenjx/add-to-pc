@@ -90,23 +90,21 @@ def docCreator(main_content, summary_content, key):
     logger.info(f"Created document with metadata for key: {key}")
     return Document(page_content=main_content, metadata=metadata)
 
-def semantic_documents_chunks_generator(documents):
+def semantic_documents_chunks_generator(document):
     text_splitter = CharacterTextSplitter(
         separator="\n",
         chunk_size=1500,    
         chunk_overlap=0,
         length_function=len,
     )
-    for doc in documents:
-        yield from text_splitter.split_documents([doc])
+    yield from text_splitter.split_documents([document])
 
-def add_documents_pinecone_batched(chunks, batch_size=100):
+def add_documents_pinecone_batched(chunks, batch_size=1):
     embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
     pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
-    for i in range(0, len(chunks), batch_size):
-        batch = chunks[i:i+batch_size]
-        pinecone_vs.add_documents(batch)
-        logger.info(f"Added batch of {len(batch)} chunks to Pinecone index {INDEX_NAME}")
+    
+    pinecone_vs.add_documents(chunks)
+    logger.info(f"Added {len(chunks)} chunks to Pinecone index {INDEX_NAME}")
 
 def save_checkpoint(last_processed_index):
     """Save the current processing checkpoint to S3."""
@@ -189,10 +187,7 @@ def process_all_files(celery_task=None):
             
             try:
                 doc = docCreator(main_content, summary_content, key)
-                chunks = list(semantic_documents_chunks_generator(doc))
-                logger.info(f"Created {len(chunks)} chunks for {key}")
-                
-                for chunk in chunks:
+                for chunk in semantic_documents_chunks_generator(doc):
                     add_documents_pinecone_batched([chunk])
                 
                 append_to_logs_s3(key)
