@@ -151,6 +151,16 @@ def log_memory_usage():
     mem_info = process.memory_info()
     logger.info(f"Memory usage: {mem_info.rss / 1024 / 1024:.2f} MB")
 
+def get_total_file_count():
+    try:
+        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key='total_file_count.txt')
+        return int(response['Body'].read().decode('utf-8'))
+    except:
+        return None
+
+def update_total_file_count(count):
+    s3.put_object(Bucket=AWS_BUCKET_NAME, Key='total_file_count.txt', Body=str(count).encode('utf-8'))
+
 def process_all_files(celery_task=None):
     try:
         limit_memory(450 * 1024 * 1024)
@@ -159,14 +169,12 @@ def process_all_files(celery_task=None):
         start_index = load_checkpoint()
         logger.info(f"Starting from index: {start_index}")
 
-        total_files = sum(1 for _ in list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME')))
-        logger.info(f"Total files in bucket: {total_files}")
-
+        total_files = get_total_file_count()
         processed_files = 0
         skipped_files = 0
         for i, key in enumerate(islice(file_generator, start_index, None), start=start_index):
             log_memory_usage()
-            logger.info(f"Processing file {i+1} of {total_files}: {key}")
+            logger.info(f"Processing file number {i+1}: {key}")
             
             if key in set(read_logs_from_s3()):
                 logger.info(f'{key} already uploaded, skipping')
@@ -193,11 +201,18 @@ def process_all_files(celery_task=None):
                 append_to_logs_s3(key)
                 processed_files += 1
                 
-                progress = 100 * (i + 1) / total_files
-                logger.info(f'{progress:.2f}% done. Processed {processed_files} files, skipped {skipped_files} files.')
+                if total_files:
+                    progress = 100 * (i + 1) / total_files
+                    logger.info(f'{progress:.2f}% done. Processed {processed_files} files, skipped {skipped_files} files.')
+                else:
+                    logger.info(f"Processed {processed_files} files, skipped {skipped_files} files.")
                 
                 if celery_task:
-                    celery_task.update_state(state='PROGRESS', meta={'status': f'{progress:.2f}% complete'})
+                    celery_task.update_state(state='PROGRESS', meta={'processed': processed_files, 'skipped': skipped_files, 'total': total_files})
+                
+                if i % 1000 == 0:  # Update total file count periodically
+                    update_total_file_count(i + 1)
+            
             except Exception as e:
                 logger.warning(f"Error processing {key}: {e}")
                 skipped_files += 1
@@ -209,8 +224,8 @@ def process_all_files(celery_task=None):
             if i % 10 == 0:
                 save_checkpoint(i)
         
-        logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files, out of {total_files} total files.")
-        return {'status': 'All files processed successfully'}
+        logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
+        return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files, 'total': total_files}
     except Exception as e:
         logger.critical(f"Critical error in main process: {e}")
         return {'status': f'Error: {str(e)}'}
