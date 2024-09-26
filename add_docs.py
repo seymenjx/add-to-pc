@@ -15,6 +15,7 @@ from itertools import islice
 import psutil
 import time
 import resource
+from memory_profiler import profile
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -221,3 +222,27 @@ def process_all_files(celery_task=None):
     except Exception as e:
         logger.critical(f"Critical error in main process: {str(e)}", exc_info=True)
         return {'status': f'Error: {str(e)}'}
+
+@profile
+def process_files_in_batches(file_list, batch_size=10):
+    for i in range(0, len(file_list), batch_size):
+        batch = file_list[i:i+batch_size]
+        try:
+            process_batch(batch)
+        except MemoryError:
+            print(f"Memory error processing batch {i//batch_size + 1}. Skipping.")
+        finally:
+            # Force garbage collection
+            gc.collect()
+
+def process_batch(batch):
+    for file in batch:
+        try:
+            # Your existing processing logic here
+            process_single_file(file)
+        except Exception as e:
+            print(f"Error processing file {file}: {str(e)}")
+
+if __name__ == "__main__":
+    all_files = get_all_files()  # Your existing method to get files
+    process_files_in_batches(all_files)
