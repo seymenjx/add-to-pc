@@ -15,6 +15,8 @@ from pinecone import PineconeException
 import re
 import gc
 from itertools import islice
+import psutil
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -212,11 +214,11 @@ def process_all_files(celery_task=None, batch_size=10):
                     print(f'{key} already uploaded')
                     continue
                 
-                main_content = ''.join(read_file_from_s3_streaming(AWS_BUCKET_NAME, key))
-                summary_content = ''.join(read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}"))
+                main_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, key)
+                summary_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}")
                 
-                if not main_content or not summary_content:
-                    print(f"Skipping {key} due to read error")
+                if main_content is None or summary_content is None:
+                    print(f"Skipping {key} due to read error or empty file")
                     continue
                 
                 try:
@@ -233,12 +235,20 @@ def process_all_files(celery_task=None, batch_size=10):
                 except Exception as e:
                     print(f'Error processing {key}: {e}')
                     continue
-
-        # Save final checkpoint
-        save_checkpoint(len(files))
+                
+                gc.collect()  # Force garbage collection after processing each file
+            
+            save_checkpoint(i * batch_size)
+        
         print("Processing complete")
+        return {'status': 'All files processed successfully'}
     except Exception as e:
         logger.critical(f"Critical error in main process: {e}")
-        raise
+        return {'status': f'Error: {str(e)}'}
 
-# Note: The __main__ block has been removed from add_docs_pc.py
+def log_memory_usage():
+    process = psutil.Process(os.getpid())
+    mem = process.memory_info().rss / 1024 / 1024  # in MB
+    logger.info(f"Current memory usage: {mem:.2f} MB")
+
+# Call this function periodically in your process_all_files function
