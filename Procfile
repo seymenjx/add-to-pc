@@ -1,1 +1,2 @@
-web: python add-docs-pc.py
+web: gunicorn app:app
+worker: celery -A tasks worker --loglevel=info
