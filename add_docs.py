@@ -19,6 +19,7 @@ from memory_profiler import profile
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pinecone
+from pinecone import Pinecone, ServerlessSpec
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -46,9 +47,18 @@ except Exception as e:
     logger.error(f"Failed to initialize S3 client: {e}")
     raise
 
-# Initialize Pinecone client with a connection pool
-pinecone.init(api_key=os.getenv("PINECONE_API_KEY"), environment=os.getenv("PINECONE_ENVIRONMENT"))
-index = pinecone.Index(os.getenv("PINECONE_INDEX_NAME"))
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+
+# If you need to create an index (you probably don't need this if the index already exists)
+# if os.getenv("PINECONE_INDEX_NAME") not in pc.list_indexes().names():
+#     pc.create_index(
+#         name=os.getenv("PINECONE_INDEX_NAME"),
+#         dimension=1536,  # adjust as needed
+#         metric='cosine',
+#         spec=ServerlessSpec(cloud='aws', region='us-west-2')  # adjust as needed
+#     )
+
+index = pc.Index(os.getenv("PINECONE_INDEX_NAME"))
 
 # Create a ThreadPoolExecutor with a limited number of workers
 chunk_executor = ThreadPoolExecutor(max_workers=5)
@@ -94,7 +104,7 @@ def process_all_files(celery_task=None):
 
         embeddings = create_embeddings()
         
-        file_generator = list_files_in_bucket_generator(bucket_name, batch_size=1000)  # Reduced batch size
+        file_generator = list_files_in_bucket_generator(bucket_name, batch_size=10000)
         
         while True:
             try:
@@ -102,23 +112,24 @@ def process_all_files(celery_task=None):
             except StopIteration:
                 break
             
-            for file in file_batch:
-                if process_single_file(file, embeddings):
-                    processed_files += 1
-                else:
-                    skipped_files += 1
-                
-                if (processed_files + skipped_files) % 100 == 0:
-                    if celery_task:
-                        celery_task.update_state(state='PROGRESS', meta={
-                            'current': processed_files + skipped_files,
-                            'total': total_files,
-                            'status': f'Processed: {processed_files}, Skipped: {skipped_files}'
-                        })
-                    save_checkpoint(processed_files + skipped_files)
-                    logger.info(f"Progress: Processed {processed_files}, Skipped {skipped_files}")
-                    gc.collect()
-                    log_memory_usage()
+            batch_result = process_file_batch(file_batch, embeddings)
+            
+            processed_files += batch_result['processed']
+            skipped_files += batch_result['skipped']
+            
+            if celery_task:
+                celery_task.update_state(state='PROGRESS', meta={
+                    'current': processed_files + skipped_files,
+                    'total': total_files,
+                    'status': f'Processed: {processed_files}, Skipped: {skipped_files}'
+                })
+            
+            save_checkpoint(processed_files + skipped_files)
+            
+            logger.info(f"Batch complete. Total processed: {processed_files}, Total skipped: {skipped_files}")
+            
+            gc.collect()
+            log_memory_usage()
         
         logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
         return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
@@ -178,6 +189,7 @@ def semantic_documents_chunks_generator(document):
                 'summary': document.metadata.get('summary', '')  # Include summary if available
             }
         )
+        del chunk  # Explicitly delete the chunk to free memory
 
 def process_chunk(chunk, embeddings):
     try:
@@ -220,7 +232,8 @@ def process_single_file(key, embeddings):
             batch = chunks[i:i+10]
             for chunk in batch:
                 process_chunk(chunk, embeddings)
-            gc.collect()  # Force garbage collection after each batch
+                del chunk  # Explicitly delete the chunk to free memory
+                gc.collect()  # Force garbage collection after each chunk
 
         append_to_logs_s3(key)
         return True
