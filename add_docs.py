@@ -16,6 +16,7 @@ import psutil
 import time
 import resource
 from memory_profiler import profile
+from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -54,17 +55,18 @@ def list_files_in_bucket_generator(bucket_name):
 
 def read_file_from_s3_streaming(bucket, key):
     try:
+        s3 = boto3.client('s3')
         response = s3.get_object(Bucket=bucket, Key=key)
         content = []
-        for chunk in response['Body'].iter_chunks(chunk_size=4096):  # 4KB chunks
-            if chunk:
+        for chunk in response['Body'].iter_chunks(chunk_size=4096):
+            try:
                 content.append(chunk.decode('utf-8'))
-        if not content:
-            logger.warning(f"File {key} is empty")
-            return None
+            except UnicodeDecodeError:
+                # Try decoding with 'latin-1' if UTF-8 fails
+                content.append(chunk.decode('latin-1'))
         return ''.join(content)
-    except ClientError as e:
-        logger.error(f"Error reading file {key}: {e}")
+    except Exception as e:
+        logger.error(f"Error reading file {key} from S3: {str(e)}")
         return None
 
 def docCreator(main_content, summary_content, key):
@@ -173,10 +175,16 @@ def process_all_files(celery_task=None):
 
         processed_files = 0
         skipped_files = 0
-        for i, key in enumerate(islice(file_generator, start_index, None), start=start_index):
+
+        embeddings = create_embeddings()
+
+        for i, key in enumerate(file_generator):
+            if i < start_index:
+                continue
+
             log_memory_usage()
             logger.info(f"Processing file number {i+1}: {key}")
-            
+
             if key in set(read_logs_from_s3()):
                 logger.info(f'{key} already uploaded, skipping')
                 skipped_files += 1
@@ -191,14 +199,14 @@ def process_all_files(celery_task=None):
             summary_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}")
             if summary_content is None:
                 logger.warning(f"Summary content for {key} not found, proceeding with main content only")
-                summary_content = ""  # Use an empty string instead of None
+                summary_content = ""
             
             try:
                 doc = docCreator(main_content, summary_content, key)
                 for chunk in semantic_documents_chunks_generator(doc):
-                    add_documents_pinecone_batched([chunk])
-                    gc.collect()  # Force garbage collection after each chunk
-                
+                    process_chunk(chunk, embeddings)
+                    gc.collect()
+
                 append_to_logs_s3(key)
                 processed_files += 1
                 
@@ -242,6 +250,18 @@ def process_batch(batch):
             process_single_file(file)
         except Exception as e:
             print(f"Error processing file {file}: {str(e)}")
+
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(3))
+def create_embeddings():
+    return OpenAIEmbeddings(model='text-embedding-3-large')
+
+def process_chunk(chunk, embeddings):
+    try:
+        pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+        pinecone_vs.add_documents([chunk])
+        logger.info(f"Added chunk to Pinecone index {INDEX_NAME}")
+    except Exception as e:
+        logger.error(f"Error processing chunk: {str(e)}")
 
 if __name__ == "__main__":
     all_files = get_all_files()  # Your existing method to get files
