@@ -1,3 +1,4 @@
+# Import necessary libraries
 import boto3
 from langchain_openai import OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 from pinecone import PineconeException
 import re
+import gc
+from itertools import islice
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,6 +29,7 @@ for var in required_env_vars:
     if not os.getenv(var):
         raise ValueError(f"Missing required environment variable: {var}")
 
+# Set AWS and Pinecone configuration variables
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
@@ -39,13 +43,16 @@ except Exception as e:
     raise
 
 def list_files_in_bucket(bucket_name):
+    """List all files in the specified S3 bucket."""
     s3 = boto3.client('s3')
     response = s3.list_objects_v2(Bucket=bucket_name)
     return [item['Key'] for item in response.get('Contents', [])]
 
+# Get list of files in the S3 bucket
 files = list_files_in_bucket(os.getenv('AWS_BUCKET_NAME'))
 
 def read_file_from_s3(bucket, key):
+    """Read a file from S3 bucket."""
     try:
         response = s3.get_object(Bucket=bucket, Key=key)
         content = response['Body'].read().decode('utf-8')
@@ -56,29 +63,13 @@ def read_file_from_s3(bucket, key):
         return None
 
 def docCreator(main_content, summary_content, key):
+    """Create a Document object with metadata."""
     if summary_content:
         try:
-                 # If summary_content is a string, convert it to a dictionary
-            """if isinstance(summary_content, str):
-                cleaned_summary_content = clean_json(summary_content)
-                print(cleaned_summary_content)
-                summary_dict = json.loads(cleaned_summary_content)
-                
-            else:
-                summary_dict = summary_content"""
-
             metadata = {
                 "source": key,
                 "summary": summary_content
             }
-            """
-                "dava_konusu": summary_dict.get("Dava Konusu", ""),
-                "hukuki_dayanak": summary_dict.get("Hukuki Dayanak", ""),
-                "mahkeme_karari": summary_dict.get("Mahkeme Kararı", ""),
-                "kararin_gerekcesi": summary_dict.get("Kararın Gerekçesi", ""),
-                "output": summary_dict.get(" Output", "")
-                """
-            
         except json.JSONDecodeError as e:
             logger.error(f"Error parsing summary content for {key}: {e}")
             metadata = {"source": key}
@@ -89,6 +80,7 @@ def docCreator(main_content, summary_content, key):
     return Document(page_content=main_content, metadata=metadata)
 
 def clean_json(json_string):
+    """Clean and format JSON string."""
     # Remove extra spaces and fix improperly escaped quotes
     json_string = re.sub(r'\s*"\s*', r'"', json_string)
     # Replace single quotes with double quotes
@@ -105,6 +97,7 @@ def clean_json(json_string):
     return json_string
 
 def semantic_documents_chunks(documents):
+    """Split documents into semantic chunks."""
     logger.info('Starting document chunking...')
     text_splitter = CharacterTextSplitter(
         separator="\n",
@@ -117,6 +110,7 @@ def semantic_documents_chunks(documents):
     return chunks
 
 def add_documents_pinecone(chunks):
+    """Add document chunks to Pinecone index."""
     try:
         embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
         pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
@@ -127,6 +121,7 @@ def add_documents_pinecone(chunks):
         raise
 
 def read_files_from_s3(bucket, key):
+    """Read main content and summary files from S3."""
     try:
         main_content = s3.get_object(Bucket=bucket, Key=key)['Body'].read().decode('utf-8')
         summary_key = f"summaries/{key}"
@@ -137,10 +132,12 @@ def read_files_from_s3(bucket, key):
         return None, None
 
 def save_checkpoint(last_processed_index):
+    """Save the current processing checkpoint to S3."""
     checkpoint_data = json.dumps({'last_processed_index': last_processed_index})
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='checkpoint.json', Body=checkpoint_data)
 
 def load_checkpoint():
+    """Load the last processing checkpoint from S3."""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key='checkpoint.json')
         checkpoint_data = json.loads(response['Body'].read().decode('utf-8'))
@@ -149,6 +146,7 @@ def load_checkpoint():
         return 0
 
 def read_logs_from_s3():
+    """Read processing logs from S3."""
     try:
         response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt')
         return response['Body'].read().decode('utf-8').splitlines()
@@ -156,47 +154,82 @@ def read_logs_from_s3():
         return []
 
 def append_to_logs_s3(key):
+    """Append a processed file key to the logs in S3."""
     current_logs = read_logs_from_s3()
     current_logs.append(key)
     logs_content = '\n'.join(current_logs)
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='logs.txt', Body=logs_content)
 
-# Keep all the imports and function definitions
+def list_files_in_bucket_generator(bucket_name):
+    """Generate a list of files in the S3 bucket."""
+    s3 = boto3.client('s3')
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=bucket_name):
+        for item in page.get('Contents', []):
+            yield item['Key']
 
-# Modify the main function to accept a Celery task object
-def process_all_files(celery_task=None):
+def read_file_from_s3_streaming(bucket, key):
+    """Read a file from S3 in streaming mode."""
     try:
-        files = list_files_in_bucket(os.getenv('AWS_BUCKET_NAME'))
-        logger.info(f"Total files to process: {len(files)}")
+        response = s3.get_object(Bucket=bucket, Key=key)
+        for chunk in response['Body'].iter_chunks(chunk_size=4096):  # 4KB chunks
+            yield chunk.decode('utf-8')
+    except ClientError as e:
+        logger.error(f"Error reading file {key}: {e}")
+        yield None
 
+def semantic_documents_chunks_generator(documents):
+    """Generate semantic chunks from documents."""
+    text_splitter = CharacterTextSplitter(
+        separator="\n",
+        chunk_size=1500,    
+        chunk_overlap=0,
+        length_function=len,
+    )
+    for doc in documents:
+        yield from text_splitter.split_documents([doc])
+
+def add_documents_pinecone_batched(chunks, batch_size=100):
+    """Add document chunks to Pinecone index in batches."""
+    embeddings = OpenAIEmbeddings(model='text-embedding-3-large')
+    pinecone_vs = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i+batch_size]
+        pinecone_vs.add_documents(batch)
+        logger.info(f"Added batch of {len(batch)} chunks to Pinecone index {INDEX_NAME}")
+
+def process_all_files(celery_task=None, batch_size=10):
+    """Process all files in the S3 bucket and add them to Pinecone index."""
+    try:
+        file_generator = list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))
         start_index = load_checkpoint()
         print(f"Starting from index: {start_index}")
 
-        for i, key in enumerate(files[start_index:], start=start_index):
-            logs = read_logs_from_s3()
-            if key in logs:
-                print(f'{key} already uploaded')
-                continue
-            else:
-                main_content, summary_content = read_files_from_s3(bucket=AWS_BUCKET_NAME, key=key)
-                if main_content is None or summary_content is None:
+        for i, batch in enumerate(iter(lambda: list(islice(file_generator, batch_size)), []), start=start_index):
+            logs = set(read_logs_from_s3())
+            for key in batch:
+                if key in logs:
+                    print(f'{key} already uploaded')
+                    continue
+                
+                main_content = ''.join(read_file_from_s3_streaming(AWS_BUCKET_NAME, key))
+                summary_content = ''.join(read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}"))
+                
+                if not main_content or not summary_content:
                     print(f"Skipping {key} due to read error")
                     continue
-                try: 
-                    doc = [docCreator(main_content, summary_content, key)]
-                    chunks = semantic_documents_chunks(doc)
-                    add_documents_pinecone(chunks=chunks)
+                
+                try:
+                    doc = docCreator(main_content, summary_content, key)
+                    chunks = list(semantic_documents_chunks_generator([doc]))
+                    add_documents_pinecone_batched(chunks)
                     append_to_logs_s3(key)
-                    progress = 100 * i / len(files)
+                    
+                    progress = 100 * i * batch_size / len(list(list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))))
                     print(f'{progress:.2f}% done')
                     
-                    # Update Celery task state if available
                     if celery_task:
                         celery_task.update_state(state='PROGRESS', meta={'status': f'{progress:.2f}% complete'})
-                    
-                    # Save checkpoint every 100 documents
-                    if i % 100 == 0:
-                        save_checkpoint(i)
                 except Exception as e:
                     print(f'Error processing {key}: {e}')
                     continue
@@ -208,4 +241,4 @@ def process_all_files(celery_task=None):
         logger.critical(f"Critical error in main process: {e}")
         raise
 
-# Remove the __main__ block from add_docs_pc.py
+# Note: The __main__ block has been removed from add_docs_pc.py
