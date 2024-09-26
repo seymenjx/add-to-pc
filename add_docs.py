@@ -155,50 +155,66 @@ def log_memory_usage():
 
 def process_all_files(celery_task=None):
     try:
-        # Limit memory usage to 450MB
         limit_memory(450 * 1024 * 1024)
         
         file_generator = list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))
         start_index = load_checkpoint()
         logger.info(f"Starting from index: {start_index}")
 
+        total_files = sum(1 for _ in list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME')))
+        logger.info(f"Total files in bucket: {total_files}")
+
+        processed_files = 0
+        skipped_files = 0
         for i, key in enumerate(islice(file_generator, start_index, None), start=start_index):
             log_memory_usage()
+            logger.info(f"Processing file {i+1} of {total_files}: {key}")
             
             if key in set(read_logs_from_s3()):
-                logger.info(f'{key} already uploaded')
+                logger.info(f'{key} already uploaded, skipping')
+                skipped_files += 1
                 continue
             
             main_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, key)
+            if main_content is None:
+                logger.warning(f"Main content for {key} is empty or couldn't be read, skipping")
+                skipped_files += 1
+                continue
+
             summary_content = read_file_from_s3_streaming(AWS_BUCKET_NAME, f"summaries/{key}")
-            
-            if main_content is None or summary_content is None:
-                logger.warning(f"Skipping {key} due to read error or empty file")
+            if summary_content is None:
+                logger.warning(f"Summary content for {key} is empty or couldn't be read, skipping")
+                skipped_files += 1
                 continue
             
             try:
                 doc = docCreator(main_content, summary_content, key)
-                for chunk in semantic_documents_chunks_generator([doc]):
+                chunks = list(semantic_documents_chunks_generator(doc))
+                logger.info(f"Created {len(chunks)} chunks for {key}")
+                
+                for chunk in chunks:
                     add_documents_pinecone_batched([chunk])
                 
                 append_to_logs_s3(key)
+                processed_files += 1
                 
-                progress = 100 * i / len(list(list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))))
-                logger.info(f'{progress:.2f}% done')
+                progress = 100 * (i + 1) / total_files
+                logger.info(f'{progress:.2f}% done. Processed {processed_files} files, skipped {skipped_files} files.')
                 
                 if celery_task:
                     celery_task.update_state(state='PROGRESS', meta={'status': f'{progress:.2f}% complete'})
             except Exception as e:
                 logger.warning(f"Error processing {key}: {e}")
+                skipped_files += 1
                 continue
             
-            gc.collect()  # Force garbage collection after processing each file
-            time.sleep(1)  # Add a small delay to allow memory to be freed
+            gc.collect()
+            time.sleep(1)
             
-            if i % 10 == 0:  # Save checkpoint every 10 files
+            if i % 10 == 0:
                 save_checkpoint(i)
         
-        logger.info("Processing complete")
+        logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files, out of {total_files} total files.")
         return {'status': 'All files processed successfully'}
     except Exception as e:
         logger.critical(f"Critical error in main process: {e}")
