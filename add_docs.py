@@ -150,21 +150,15 @@ def docCreator(main_content, summary_content, key):
         logger.warning(f"main_content for {key} is not a string. Converting to string.")
         main_content = str(main_content) if main_content is not None else ""
 
+    metadata = {"source": key}
     if summary_content:
         try:
             if not isinstance(summary_content, str):
                 logger.warning(f"summary_content for {key} is not a string. Converting to string.")
                 summary_content = str(summary_content)
-
-            metadata = {
-                "source": key,
-                "summary": summary_content
-            }
+            metadata["summary"] = summary_content
         except Exception as e:
             logger.error(f"Error processing summary content for {key}: {e}")
-            metadata = {"source": key}
-    else:
-        metadata = {"source": key}
     
     logger.info(f"Created document with metadata for key: {key}")
     return Document(page_content=main_content, metadata=metadata)
@@ -172,17 +166,32 @@ def docCreator(main_content, summary_content, key):
 def semantic_documents_chunks_generator(document):
     text_splitter = CharacterTextSplitter(
         separator="\n",
-        chunk_size=1000,  # Reduced chunk size
+        chunk_size=500,  # Reduced chunk size
         chunk_overlap=0,
         length_function=len,
     )
     for chunk in text_splitter.split_text(document.page_content):
-        yield Document(page_content=chunk, metadata=document.metadata)
+        yield Document(
+            page_content=chunk, 
+            metadata={
+                'source': document.metadata['source'],
+                'summary': document.metadata.get('summary', '')  # Include summary if available
+            }
+        )
 
 def process_chunk(chunk, embeddings):
     try:
         vector = embeddings.embed_query(chunk.page_content)
-        future = chunk_executor.submit(index.upsert, vectors=[(chunk.metadata['source'], vector, chunk.page_content)])
+        metadata = {
+            'source': chunk.metadata['source'],
+            'summary': chunk.metadata.get('summary', '')  # Include summary if available
+        }
+        future = chunk_executor.submit(index.upsert, vectors=[(
+            chunk.metadata['source'],  # ID
+            vector,  # Vector
+            metadata,  # Metadata
+            chunk.page_content  # Content
+        )])
         future.result()  # Wait for the upsert to complete
         logger.info(f"Added chunk to Pinecone index {os.getenv('PINECONE_INDEX_NAME')}")
     except Exception as e:
