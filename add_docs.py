@@ -46,7 +46,6 @@ except Exception as e:
     raise
 
 def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=1000):
-    """Generate batches of file names from the specified S3 bucket."""
     s3 = boto3.client('s3')
     paginator = s3.get_paginator('list_objects_v2')
     
@@ -57,32 +56,50 @@ def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=1000):
         if batch:
             yield batch
 
-def process_file_batch(bucket_name, file_batch):
-    """Process a batch of files."""
+def process_file_batch(file_batch, embeddings):
+    processed = 0
+    skipped = 0
     for file_key in file_batch:
         try:
-            # Your processing logic here
-            logger.info(f"Processing file: {file_key}")
-            # Example: read_file_from_s3_streaming(bucket_name, file_key)
-            # Example: process_single_file(file_key, embeddings)
+            if process_single_file(file_key, embeddings):
+                processed += 1
+            else:
+                skipped += 1
         except Exception as e:
             logger.error(f"Error processing file {file_key}: {e}")
+    return {'processed': processed, 'skipped': skipped}
 
-def process_all_files(bucket_name, max_workers=10):
+def process_all_files(celery_task=None):
     try:
-        total_files = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        total_files = get_total_file_count() or 0
+        processed_files = 0
+        skipped_files = 0
+        start_index = load_checkpoint()
+        logger.info(f"Starting from index: {start_index}")
+
+        embeddings = create_embeddings()
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = []
-            for file_batch in list_files_in_bucket_generator(bucket_name):
-                total_files += len(file_batch)
-                futures.append(executor.submit(process_file_batch, bucket_name, file_batch))
-                logger.info(f"Submitted batch. Total files so far: {total_files}")
-
+            for file_batch in list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME')):
+                futures.append(executor.submit(process_file_batch, file_batch, embeddings))
+                
             for future in as_completed(futures):
-                future.result()  # This will raise any exceptions that occurred during processing
-
-        logger.info(f"Processing complete. Total files processed: {total_files}")
-        return {'status': 'All files processed successfully', 'total_files': total_files}
+                batch_result = future.result()
+                processed_files += batch_result['processed']
+                skipped_files += batch_result['skipped']
+                
+                if celery_task:
+                    celery_task.update_state(state='PROGRESS', meta={
+                        'current': processed_files + skipped_files,
+                        'total': total_files,
+                        'status': f'Processed: {processed_files}, Skipped: {skipped_files}'
+                    })
+                
+                save_checkpoint(processed_files + skipped_files)
+        
+        logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
+        return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
     except Exception as e:
         logger.critical(f"Critical error in main process: {str(e)}", exc_info=True)
         return {'status': f'Error: {str(e)}'}
@@ -198,22 +215,6 @@ def process_files_in_batches(file_list, batch_size=10):
 
     return processed_files, skipped_files
 
-def process_all_files(celery_task=None):
-    try:
-        # Remove the call to limit_memory or replace it with the dummy function
-        file_generator = list_files_in_bucket_generator(os.getenv('AWS_BUCKET_NAME'))
-        start_index = load_checkpoint()
-        logger.info(f"Starting from index: {start_index}")
-
-        all_files = list(file_generator)[start_index:]
-        processed_files, skipped_files = process_files_in_batches(all_files)
-
-        logger.info(f"Processing complete. Processed {processed_files} files, skipped {skipped_files} files.")
-        return {'status': 'All files processed successfully', 'processed': processed_files, 'skipped': skipped_files}
-    except Exception as e:
-        logger.critical(f"Critical error in main process: {str(e)}", exc_info=True)
-        return {'status': f'Error: {str(e)}'}
-
 def save_checkpoint(last_processed_index):
     """Save the current processing checkpoint to S3."""
     checkpoint_data = json.dumps({'last_processed_index': last_processed_index})
@@ -255,12 +256,13 @@ def log_memory_usage():
     memory_info = process.memory_info()
     logger.info(f"Memory usage: {memory_info.rss / 1024 / 1024:.2f} MB")
 
-def get_total_file_count():
-    try:
-        response = s3.get_object(Bucket=AWS_BUCKET_NAME, Key='total_file_count.txt')
-        return int(response['Body'].read().decode('utf-8'))
-    except:
-        return None
+def get_total_file_count(bucket_name):
+    s3 = boto3.client('s3')
+    paginator = s3.get_paginator('list_objects_v2')
+    total_files = 0
+    for page in paginator.paginate(Bucket=bucket_name):
+        total_files += len(page.get('Contents', []))
+    return total_files
 
 def update_total_file_count(count):
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='total_file_count.txt', Body=str(count).encode('utf-8'))
