@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import pinecone
 from pinecone import Pinecone, ServerlessSpec
 import uuid
+import signal  # New import for signal handling
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -62,6 +63,17 @@ except Exception as e:
 # Create a ThreadPoolExecutor with a limited number of workers
 chunk_executor = ThreadPoolExecutor(max_workers=5)
 
+# Global variable to store the current state
+current_state = {'processed_files': 0, 'skipped_files': 0}
+
+# Signal handler to save the current state
+def save_state(signum, frame):
+    save_checkpoint(current_state['processed_files'] + current_state['skipped_files'])
+    logger.info("State saved on signal.")
+
+# Register the signal handler
+signal.signal(signal.SIGUSR1, save_state)
+
 def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=10000):
     """
     Generator function to list files in S3 bucket in batches.
@@ -97,7 +109,7 @@ def process_file_batch(file_batch, embeddings):
     logger.info(f"Batch completed: Processed {processed}, Skipped {skipped}")
     return {'processed': processed, 'skipped': skipped}
 
-def process_all_files(celery_task=None):
+def process_all_files(celery_task=None, prefix=''):
     """
     Process all files in the S3 bucket.
     """
@@ -110,7 +122,7 @@ def process_all_files(celery_task=None):
 
         embeddings = create_embeddings()
         
-        file_generator = list_files_in_bucket_generator(AWS_BUCKET_NAME, batch_size=10000)
+        file_generator = list_files_in_bucket_generator(AWS_BUCKET_NAME, prefix, batch_size=10000)
         
         for file_batch in file_generator:
             batch_result = process_file_batch(file_batch, embeddings)

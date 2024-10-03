@@ -10,9 +10,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @app.task(bind=True)
-def start_processing(self):
+def start_processing(self, prefix=''):
     try:
-        result = process_all_files(celery_task=self)
+        result = process_all_files(celery_task=self, prefix=prefix)  # Pass prefix
         return result
     except Exception as e:
         logger.error(f"Error in start_processing task: {str(e)}")

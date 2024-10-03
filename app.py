@@ -7,7 +7,8 @@ app = Flask(__name__)
 @app.route('/process', methods=['POST'])
 def process():
     try:
-        task = start_processing.delay()
+        prefix = request.json.get('prefix', '')  # Get prefix from request
+        task = start_processing.delay(prefix=prefix)  # Pass prefix to task
         return jsonify({"task_id": str(task.id)}), 202
     except Exception as e:
         app.logger.error(f"Error starting processing task: {str(e)}")
