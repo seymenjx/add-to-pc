@@ -47,6 +47,7 @@ PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
 # Initialize S3 client with error handling
 try:
     s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+    logger.info("S3 client initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize S3 client: {e}")
     raise
@@ -62,9 +63,11 @@ except Exception as e:
 
 # Create a ThreadPoolExecutor with a limited number of workers
 chunk_executor = ThreadPoolExecutor(max_workers=5)
+logger.info("ThreadPoolExecutor created with 5 workers")
 
 # Global variable to store the current state
 current_state = {'processed_files': 0, 'skipped_files': 0}
+logger.info("Global variable current_state initialized")
 
 # Signal handler to save the current state
 def save_state(signum, frame):
@@ -73,19 +76,23 @@ def save_state(signum, frame):
 
 # Register the signal handler
 signal.signal(signal.SIGUSR1, save_state)
+logger.info("Signal handler registered")
 
 def list_files_in_bucket_generator(bucket_name, prefix='', batch_size=10000):
     """
     Generator function to list files in S3 bucket in batches.
     """
     paginator = s3.get_paginator('list_objects_v2')
+    logger.info("Paginator created")
     
     kwargs = {'Bucket': bucket_name, 'Prefix': prefix, 'PaginationConfig': {'PageSize': batch_size}}
+    logger.info("Generator function arguments initialized")
     
     for page in paginator.paginate(**kwargs):
         batch = [item['Key'] for item in page.get('Contents', [])]
         if batch:
             yield batch
+            logger.info("Batch yielded")
 
 def process_file_batch(file_batch, embeddings):
     """
@@ -272,6 +279,7 @@ def save_checkpoint(last_processed_index):
     """
     checkpoint_data = json.dumps({'last_processed_index': last_processed_index})
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='checkpoint.json', Body=checkpoint_data)
+    logger.info("Checkpoint saved to S3")
 
 def load_checkpoint():
     """
@@ -341,4 +349,4 @@ def update_total_file_count(count):
     Update total file count in S3.
     """
     s3.put_object(Bucket=AWS_BUCKET_NAME, Key='total_file_count.txt', Body=str(count).encode('utf-8'))
-
+    logger.info("Total file count updated in S3")
