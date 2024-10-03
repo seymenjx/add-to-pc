@@ -183,15 +183,7 @@ def docCreator(main_content, summary_content, key):
         main_content = str(main_content) if main_content is not None else ""
 
     metadata = {"source": key}
-    if summary_content:
-        try:
-            if not isinstance(summary_content, str):
-                logger.warning(f"summary_content for {key} is not a string. Converting to string.")
-                summary_content = str(summary_content)
-            metadata["summary"] = summary_content
-        except Exception as e:
-            logger.error(f"Error processing summary content for {key}: {e}")
-    
+    # Removed summary_content from metadata
     logger.info(f"Created document with metadata for key: {key}")
     return Document(page_content=main_content, metadata=metadata)
 
